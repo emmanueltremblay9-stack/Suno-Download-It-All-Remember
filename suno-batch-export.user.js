@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno Batch Exporter - Library Workspace Only
 // @namespace    https://github.com/emmanueltremblay9-stack/Suno-Download-It-All-Remember
-// @version      0.1.8
+// @version      0.1.10
 // @description  Export owned Suno Library/Workspace songs with sidecars and optional ID3 metadata.
 // @author       Emmanuel Tremblay / Codex
 // @homepageURL  https://github.com/emmanueltremblay9-stack/Suno-Download-It-All-Remember
@@ -15,11 +15,10 @@
 // @match        https://*.suno.ai/*
 // @run-at       document-idle
 // @grant        GM_download
-// @grant        GM.getValue
-// @grant        GM.setValue
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @grant        GM_xmlhttpRequest
 // @grant        GM_registerMenuCommand
-// @grant        unsafeWindow
 // @connect      suno.com
 // @connect      www.suno.com
 // @connect      app.suno.ai
@@ -35,7 +34,7 @@
   "use strict";
 
   const SCRIPT_NAME = "Suno Batch Export";
-  const VERSION = "0.1.8";
+  const VERSION = "0.1.10";
   const DEFAULT_THROTTLE_MS = 1500;
   const MIN_THROTTLE_MS = 750;
   const AUTO_SCAN_IDLE_MS = 900;
@@ -1278,14 +1277,20 @@
     if (typeof GM !== "undefined" && GM && typeof GM.getValue === "function") {
       return GM.getValue(key, defaultValue);
     }
-    throw new Error("Tampermonkey GM.getValue is unavailable.");
+    if (typeof GM_getValue === "function") {
+      return GM_getValue(key, defaultValue);
+    }
+    throw new Error("Tampermonkey GM_getValue is unavailable.");
   }
 
   async function gmSetValue(key, value) {
     if (typeof GM !== "undefined" && GM && typeof GM.setValue === "function") {
       return GM.setValue(key, value);
     }
-    throw new Error("Tampermonkey GM.setValue is unavailable.");
+    if (typeof GM_setValue === "function") {
+      return GM_setValue(key, value);
+    }
+    throw new Error("Tampermonkey GM_setValue is unavailable.");
   }
 
   function firstNonEmpty(...values) {
@@ -1326,9 +1331,6 @@
   function getDirectoryPicker() {
     if (typeof window.showDirectoryPicker === "function") {
       return window.showDirectoryPicker.bind(window);
-    }
-    if (typeof unsafeWindow !== "undefined" && typeof unsafeWindow.showDirectoryPicker === "function") {
-      return unsafeWindow.showDirectoryPicker.bind(unsafeWindow);
     }
     return null;
   }
