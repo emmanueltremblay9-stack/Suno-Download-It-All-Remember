@@ -1,9 +1,13 @@
 // ==UserScript==
 // @name         Suno Batch Exporter - Library Workspace Only
-// @namespace    https://local.codex/suno-batch-exporter
-// @version      0.1.6
+// @namespace    https://github.com/emmanueltremblay9-stack/Suno-Download-It-All-Remember
+// @version      0.1.7
 // @description  Export owned Suno Library/Workspace songs with sidecars and optional ID3 metadata.
 // @author       Emmanuel Tremblay / Codex
+// @homepageURL  https://github.com/emmanueltremblay9-stack/Suno-Download-It-All-Remember
+// @supportURL   https://github.com/emmanueltremblay9-stack/Suno-Download-It-All-Remember/issues
+// @downloadURL  https://raw.githubusercontent.com/emmanueltremblay9-stack/Suno-Download-It-All-Remember/main/suno-batch-export.user.js
+// @updateURL    https://raw.githubusercontent.com/emmanueltremblay9-stack/Suno-Download-It-All-Remember/main/suno-batch-export.user.js
 // @match        https://suno.com/*
 // @match        https://www.suno.com/*
 // @match        https://*.suno.com/*
@@ -30,7 +34,7 @@
   "use strict";
 
   const SCRIPT_NAME = "Suno Batch Export";
-  const VERSION = "0.1.6";
+  const VERSION = "0.1.7";
   const DEFAULT_THROTTLE_MS = 1500;
   const MIN_THROTTLE_MS = 750;
   const AUTO_SCAN_IDLE_MS = 900;

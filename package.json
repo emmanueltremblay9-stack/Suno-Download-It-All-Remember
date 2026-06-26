@@ -1,6 +1,6 @@
 {
   "name": "suno-tampermonkey-batch-exporter",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "description": "Tampermonkey userscript and local ID3 post-processor for exporting owned Suno Library/Workspace songs.",
   "type": "commonjs",

@@ -20,11 +20,23 @@ This project contains a conservative Tampermonkey userscript for exporting songs
 
 ## Tampermonkey Install
 
+Direct install URL:
+
+https://raw.githubusercontent.com/emmanueltremblay9-stack/Suno-Download-It-All-Remember/main/suno-batch-export.user.js
+
+Clicking that raw `.user.js` URL should open Tampermonkey's install screen. Do not use the normal GitHub file preview page as the installer URL.
+
 1. Install Tampermonkey in Chrome or Edge.
+2. Open the direct install URL above.
+3. Confirm `Install` in Tampermonkey.
+4. Open your authenticated Suno Library or Workspace page.
+
+Manual fallback:
+
+1. Open Tampermonkey Dashboard.
 2. Create a new userscript.
 3. Paste the full contents of `suno-batch-export.user.js`.
 4. Save it.
-5. Open your authenticated Suno Library or Workspace page.
 
 The script requires JSZip from jsDelivr for ZIP creation. No analytics, remote logging, credential collection, or token export is included.
 
@@ -72,9 +84,10 @@ node tools/postprocess-id3.cjs --input "C:\Path\To\Suno Export" --dry-run
 
 ## Troubleshooting
 
-- No `Suno Batch Export` button appears: verify Tampermonkey is enabled, the script version is `0.1.6` or newer, and the page URL matches `suno.com`, a Suno subdomain, or `app.suno.ai`.
+- Install page does not open: use the raw URL above, not `github.com/.../blob/...`. If the browser only shows text, copy the raw URL and paste it into Tampermonkey Dashboard's import/install-from-URL field, or use the manual fallback.
+- No `Suno Batch Export` button appears: verify Tampermonkey is enabled, the script version is `0.1.7` or newer, and the page URL matches `suno.com`, a Suno subdomain, or `app.suno.ai`.
 - Export controls disabled: open a Suno page. The script matches `suno.com`, Suno subdomains, and `suno.ai` subdomains.
-- No songs detected: scroll the library so song cards or song links are visible, then click `Scan visible`. Version `0.1.6` also adds `Scan all`, falls back to plain visible Suno song, clip, track, and MP3 links, accumulates scans into the queue, and does not cap the detected queue.
+- No songs detected: scroll the library so song cards or song links are visible, then click `Scan visible`. Version `0.1.7` also adds `Scan all`, falls back to plain visible Suno song, clip, track, and MP3 links, accumulates scans into the queue, and does not cap the detected queue.
 - Multi-select clicks open the song instead of selecting it: confirm the `multi-select` checkbox is enabled in the exporter panel and scan again.
 - Missing MP3 in ZIP mode: Suno did not expose a safe authorized MP3 URL in the visible page. Use Suno's official download button, then run the local post-processor.
 - Missing lyrics, prompt, style, or date: Suno did not render those fields in the visible card. Open expanded song details if Suno provides them, then scan again.
