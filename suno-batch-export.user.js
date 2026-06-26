@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno Batch Exporter - Library Workspace Only
 // @namespace    https://github.com/emmanueltremblay9-stack/Suno-Download-It-All-Remember
-// @version      0.1.7
+// @version      0.1.8
 // @description  Export owned Suno Library/Workspace songs with sidecars and optional ID3 metadata.
 // @author       Emmanuel Tremblay / Codex
 // @homepageURL  https://github.com/emmanueltremblay9-stack/Suno-Download-It-All-Remember
@@ -19,6 +19,7 @@
 // @grant        GM.setValue
 // @grant        GM_xmlhttpRequest
 // @grant        GM_registerMenuCommand
+// @grant        unsafeWindow
 // @connect      suno.com
 // @connect      www.suno.com
 // @connect      app.suno.ai
@@ -34,7 +35,7 @@
   "use strict";
 
   const SCRIPT_NAME = "Suno Batch Export";
-  const VERSION = "0.1.7";
+  const VERSION = "0.1.8";
   const DEFAULT_THROTTLE_MS = 1500;
   const MIN_THROTTLE_MS = 750;
   const AUTO_SCAN_IDLE_MS = 900;
@@ -64,6 +65,8 @@
     selectedOnly: false,
     multiSelectMode: false,
     scanningAll: false,
+    downloadDirectoryHandle: null,
+    downloadDirectoryName: "",
     lastSelectedIndex: -1,
     throttleMs: DEFAULT_THROTTLE_MS,
     status: "Idle.",
@@ -105,6 +108,7 @@
   function ensureLauncherButton() {
     if (launcherHost && document.documentElement.contains(launcherHost)) {
       launcherHost.style.display = host && document.documentElement.contains(host) ? "none" : "block";
+      positionLauncherButton();
       return;
     }
 
@@ -112,8 +116,9 @@
     launcherHost.id = "suno-batch-export-launcher-host";
     launcherHost.style.position = "fixed";
     launcherHost.style.zIndex = "2147483647";
-    launcherHost.style.right = "16px";
-    launcherHost.style.bottom = "16px";
+    launcherHost.style.right = "24px";
+    launcherHost.style.top = "224px";
+    launcherHost.style.bottom = "auto";
     document.documentElement.appendChild(launcherHost);
 
     launcherShadow = launcherHost.attachShadow({ mode: "open" });
@@ -141,6 +146,41 @@
       <button type="button" title="Open Suno Batch Export download menu">Suno Batch Export</button>
     `;
     launcherShadow.querySelector("button").addEventListener("click", openPanel);
+    positionLauncherButton();
+  }
+
+  function positionLauncherButton() {
+    if (!launcherHost || !document.documentElement.contains(launcherHost)) {
+      return;
+    }
+    const anchor = findLauncherAnchorElement();
+    if (anchor) {
+      const rect = anchor.getBoundingClientRect();
+      const top = Math.min(window.innerHeight - 56, Math.max(16, rect.bottom + 10));
+      const right = Math.max(16, window.innerWidth - rect.right);
+      launcherHost.style.top = `${top}px`;
+      launcherHost.style.right = `${right}px`;
+      launcherHost.style.bottom = "auto";
+      return;
+    }
+    launcherHost.style.top = "224px";
+    launcherHost.style.right = "24px";
+    launcherHost.style.bottom = "auto";
+  }
+
+  function findLauncherAnchorElement() {
+    const controls = Array.from(document.querySelectorAll("button, a[href], [role='button']"));
+    const audioButton = controls.find((control) => {
+      if (!(control instanceof Element) || !isVisible(control)) {
+        return false;
+      }
+      const text = `${control.textContent || ""} ${control.getAttribute("aria-label") || ""} ${control.getAttribute("title") || ""}`;
+      return /\baudio\b/i.test(text);
+    });
+    if (!audioButton) {
+      return null;
+    }
+    return audioButton.parentElement || audioButton;
   }
 
   function openPanel() {
@@ -187,6 +227,7 @@
       return result;
     };
     window.addEventListener("popstate", () => scanSoon(500));
+    window.addEventListener("resize", positionLauncherButton);
 
     const observer = new MutationObserver(() => {
       ensureLauncherButton();
@@ -238,6 +279,11 @@
     const allQueuedSelected = Boolean(queuedSongs.length) && queuedSelectedCount === queuedSongs.length;
     const someQueuedSelected = queuedSelectedCount > 0 && !allQueuedSelected;
     const failedCount = state.failedKeys.size;
+    const canChooseDownloadFolder = canUseDirectoryPicker();
+    const folderButtonText = state.downloadDirectoryHandle ? "Change folder" : "Select folder";
+    const folderStatus = state.downloadDirectoryHandle
+      ? `Folder: ${state.downloadDirectoryName || "selected"}`
+      : canChooseDownloadFolder ? "Folder: browser default" : "Folder picker unavailable";
     const listItems = queuedSongs.map((song, index) => {
       const checked = state.selectedKeys.has(song.key) ? "checked" : "";
       const metaLine = [song.duration, song.creationDate, song.id || song.fallbackId].filter(Boolean).join(" | ");
@@ -303,6 +349,11 @@
           flex-wrap: wrap;
           gap: 8px;
           align-items: center;
+        }
+        .folder-note {
+          flex-basis: 100%;
+          font-size: 11px;
+          opacity: 0.68;
         }
         button, select, input[type="number"] {
           box-sizing: border-box;
@@ -456,8 +507,10 @@
           <div class="actions">
             <button type="button" class="primary" data-action="dry-run" ${state.running || !allowed || !selectedCount ? "disabled" : ""}>Dry run</button>
             <button type="button" class="primary" data-action="export" ${state.running || !allowed || !selectedCount ? "disabled" : ""}>Export</button>
+            <button type="button" data-action="select-folder" title="Select download folder" ${state.running || !canChooseDownloadFolder ? "disabled" : ""}>${folderButtonText}</button>
             <button type="button" data-action="retry" ${state.running || !allowed || !failedCount ? "disabled" : ""}>Retry failed</button>
             <button type="button" class="danger" data-action="cancel" ${state.running ? "" : "disabled"}>Cancel</button>
+            <small class="folder-note">${escapeHtml(folderStatus)}</small>
           </div>
           <div class="selection-toolbar">
             <label class="check">
@@ -563,6 +616,10 @@
     }
     if (action === "export") {
       startBatch({ dryRun: false });
+      return;
+    }
+    if (action === "select-folder") {
+      selectDownloadFolder();
     }
   }
 
@@ -1175,7 +1232,7 @@
     try {
       const fileName = options.fileName || track.suggestedFileName || `${cleanFileName(trackLabel(track))}.mp3`;
       if (options.blob) {
-        await downloadBlobWithGm(options.blob, fileName);
+        await saveExportBlob(options.blob, fileName, options.relativePath || `mp3/${fileName}`, { confirmedDownload: true });
       } else {
         const url = firstNonEmpty(track.downloadUrl, track.download_url, track.audioUrl, track.audio_url);
         if (!url) {
@@ -1262,6 +1319,71 @@
     await startBatch({ dryRun: false });
   }
 
+  function canUseDirectoryPicker() {
+    return Boolean(getDirectoryPicker());
+  }
+
+  function getDirectoryPicker() {
+    if (typeof window.showDirectoryPicker === "function") {
+      return window.showDirectoryPicker.bind(window);
+    }
+    if (typeof unsafeWindow !== "undefined" && typeof unsafeWindow.showDirectoryPicker === "function") {
+      return unsafeWindow.showDirectoryPicker.bind(unsafeWindow);
+    }
+    return null;
+  }
+
+  async function selectDownloadFolder() {
+    const picker = getDirectoryPicker();
+    if (!picker) {
+      state.status = "Download folder picker is not available in this browser. Normal browser downloads will be used.";
+      render();
+      return;
+    }
+
+    try {
+      const handle = await picker({
+        id: "suno-batch-export",
+        mode: "readwrite"
+      });
+      const allowed = await ensureDirectoryPermission(handle);
+      if (!allowed) {
+        state.status = "Download folder permission was denied. Normal browser downloads will be used.";
+        render();
+        return;
+      }
+      state.downloadDirectoryHandle = handle;
+      state.downloadDirectoryName = handle.name || "selected folder";
+      state.status = `Download folder selected: ${state.downloadDirectoryName}.`;
+      render();
+    } catch (error) {
+      if (error && error.name === "AbortError") {
+        state.status = "Download folder selection canceled.";
+      } else {
+        state.status = `Download folder selection failed: ${messageFrom(error)}`;
+        console.error("[FAILED]", "select-download-folder", error);
+      }
+      render();
+    }
+  }
+
+  async function ensureDirectoryPermission(handle) {
+    if (!handle) {
+      return false;
+    }
+    const options = { mode: "readwrite" };
+    if (typeof handle.queryPermission === "function") {
+      const current = await handle.queryPermission(options);
+      if (current === "granted") {
+        return true;
+      }
+    }
+    if (typeof handle.requestPermission === "function") {
+      return await handle.requestPermission(options) === "granted";
+    }
+    return true;
+  }
+
   async function startBatch({ dryRun }) {
     if (state.running) {
       return;
@@ -1340,8 +1462,9 @@
       if (successfulResults.length) {
         const blob = await zip.generateAsync({ type: "blob" });
         const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        const zipFileName = `suno-batch-export-${stamp}.zip`;
         try {
-          await downloadBlobWithGm(blob, `suno-batch-export-${stamp}.zip`);
+          await saveExportBlob(blob, zipFileName, zipFileName, { confirmedDownload: true });
           for (const track of zipTracksToMark) {
             await markTrackDownloaded(track);
           }
@@ -1433,7 +1556,7 @@
         metadata.coverFileName = `${baseName}${coverExt}`;
         addSidecar(context.zip, cover.blob, `covers/${metadata.coverFileName}`);
         if (state.exportMode === "individual") {
-          downloadBlob(cover.blob, metadata.coverFileName);
+          await saveExportBlob(cover.blob, metadata.coverFileName, `covers/${metadata.coverFileName}`);
         }
       } catch (error) {
         warnings.push(`Cover unavailable: ${messageFrom(error)}`);
@@ -1451,7 +1574,7 @@
       metadata.lyricsFileName = `${baseName}.txt`;
       addSidecar(context.zip, blob, `lyrics/${metadata.lyricsFileName}`);
       if (state.exportMode === "individual") {
-        downloadBlob(blob, metadata.lyricsFileName);
+        await saveExportBlob(blob, metadata.lyricsFileName, `lyrics/${metadata.lyricsFileName}`);
       }
     }
 
@@ -1508,7 +1631,7 @@
       metadata.metadataFileName = `${baseName}.json`;
       addSidecar(context.zip, blob, `metadata/${metadata.metadataFileName}`);
       if (state.exportMode === "individual") {
-        downloadBlob(blob, metadata.metadataFileName);
+        await saveExportBlob(blob, metadata.metadataFileName, `metadata/${metadata.metadataFileName}`);
       }
     }
 
@@ -1955,6 +2078,54 @@
       return false;
     }
     return isSunoHost(url.hostname) || url.hostname.toLowerCase() === location.hostname.toLowerCase();
+  }
+
+  async function saveExportBlob(blob, fileName, relativePath, options = {}) {
+    if (state.downloadDirectoryHandle) {
+      const savedPath = await writeBlobToSelectedFolder(blob, relativePath || fileName);
+      console.info("[DOWNLOADED]", savedPath);
+      return { status: "folder", path: savedPath };
+    }
+    if (options.confirmedDownload) {
+      await downloadBlobWithGm(blob, fileName);
+      return { status: "download", path: fileName };
+    }
+    downloadBlob(blob, fileName);
+    return { status: "download", path: fileName };
+  }
+
+  async function writeBlobToSelectedFolder(blob, relativePath) {
+    const handle = state.downloadDirectoryHandle;
+    if (!handle) {
+      throw new Error("No download folder is selected.");
+    }
+    const allowed = await ensureDirectoryPermission(handle);
+    if (!allowed) {
+      throw new Error("Download folder permission was denied.");
+    }
+
+    const parts = String(relativePath || "download")
+      .split(/[\\/]+/)
+      .map((part) => cleanFileName(part))
+      .filter(Boolean);
+    if (!parts.length) {
+      parts.push("download");
+    }
+
+    let directory = handle;
+    for (const folderName of parts.slice(0, -1)) {
+      directory = await directory.getDirectoryHandle(folderName, { create: true });
+    }
+
+    const fileName = parts[parts.length - 1];
+    const fileHandle = await directory.getFileHandle(fileName, { create: true });
+    const writable = await fileHandle.createWritable();
+    try {
+      await writable.write(blob);
+    } finally {
+      await writable.close();
+    }
+    return `${state.downloadDirectoryName || "selected folder"}/${parts.join("/")}`;
   }
 
   async function downloadBlobWithGm(blob, fileName) {
