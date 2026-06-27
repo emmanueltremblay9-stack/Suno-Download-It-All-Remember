@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno Batch Exporter - Library Workspace Only
 // @namespace    https://github.com/emmanueltremblay9-stack/Suno-Download-It-All-Remember
-// @version      0.1.12
+// @version      0.1.13
 // @description  Export owned Suno Library/Workspace songs with sidecars and optional ID3 metadata.
 // @author       Emmanuel Tremblay / Codex
 // @homepageURL  https://github.com/emmanueltremblay9-stack/Suno-Download-It-All-Remember
@@ -36,7 +36,7 @@
   "use strict";
 
   const SCRIPT_NAME = "Suno Batch Export";
-  const VERSION = "0.1.12";
+  const VERSION = "0.1.13";
   const DEFAULT_THROTTLE_MS = 1500;
   const MIN_THROTTLE_MS = 750;
   const AUTO_SCAN_IDLE_MS = 900;
@@ -1608,33 +1608,66 @@
     render();
   }
 
+  function resolveSongCard(song) {
+    const mapped = song && elementByKey.get(song.key);
+    if (mapped && mapped.isConnected) {
+      return mapped;
+    }
+    if (song && song.card && song.card.isConnected) {
+      return song.card;
+    }
+    return mapped || (song && song.card) || null;
+  }
+
   async function exportSong(song, context) {
     const warnings = [];
     const sidecars = [];
-    const card = elementByKey.get(song.key);
+    const card = resolveSongCard(song);
     const baseName = uniqueBaseName(song.baseName, context.usedNames);
     const metadata = buildMetadata(song, baseName);
-    const duplicateKey = buildTrackKey(song);
     let zipGuardKey = "";
     let mp3FailureReason = "";
-    const audioUrlVisible = Boolean(song.audioUrl);
-    const safeMp3UrlAvailable = Boolean(audioUrlVisible && isAllowedSunoUrl(song.audioUrl));
-    const visibleOfficialDownloadAvailable = Boolean(card && findOfficialDownloadButton(card));
-    const individualButtonFallbackPossible = Boolean(card && (visibleOfficialDownloadAvailable || findOfficialOptionsButton(card)));
-    const zipNoDirectMessage = individualButtonFallbackPossible
-      ? "ZIP mode cannot capture Suno's browser download button. Switch Mode to Individual for MP3."
-      : "No direct authorized MP3 URL was visible. Switch Mode to Individual for MP3 or use Suno manual download.";
+    const cardAvailable = Boolean(card && card.isConnected !== false);
+    const audioUrlVisibleBeforeRefresh = Boolean(song.audioUrl);
+    const visibleOfficialDownloadAvailableBeforeHover = Boolean(card && findOfficialDownloadButton(card));
+    const optionsButtonAvailableBeforeHover = Boolean(card && findOfficialOptionsButton(card));
+    let mediaInfo = refreshSongMediaInfo(song, card);
+    if (card && state.includeMp3) {
+      await revealCardActions(card);
+      mediaInfo = refreshSongMediaInfo(song, card);
+    }
+    const safeMp3UrlAvailable = mediaInfo.safeMp3UrlAvailable;
+    const visibleOfficialDownloadAvailableAfterHover = Boolean(card && findOfficialDownloadButton(card));
+    const optionsButtonAvailableAfterHover = Boolean(card && findOfficialOptionsButton(card));
+    const individualButtonFallbackPossible = Boolean(visibleOfficialDownloadAvailableAfterHover || optionsButtonAvailableAfterHover);
+    const zipNoDirectMessage = "ZIP mode needs a direct authorized MP3 URL. Suno's browser download button can only be used in Individual mode.";
+    const individualNoControlMessage = "No direct authorized MP3 URL was visible, and no visible Suno Download/Audio/MP3 control was found after hover/menu reveal. Open the song card, make sure the Download menu is visible, then retry Individual mode.";
+    const duplicateKey = buildTrackKey(song);
+    metadata.cardAvailable = cardAvailable;
+    metadata.audioUrlVisibleBeforeRefresh = audioUrlVisibleBeforeRefresh;
+    metadata.audioUrlVisibleAfterRefresh = mediaInfo.audioUrlVisibleAfterRefresh;
+    metadata.hydratedAudioUrlAvailable = mediaInfo.hydratedAudioUrlAvailable;
     metadata.audioUrlAllowed = safeMp3UrlAvailable;
     metadata.safeMp3UrlAvailable = safeMp3UrlAvailable;
-    metadata.visibleOfficialDownloadAvailable = visibleOfficialDownloadAvailable;
+    metadata.visibleOfficialDownloadAvailable = visibleOfficialDownloadAvailableAfterHover;
+    metadata.visibleOfficialDownloadAvailableBeforeHover = visibleOfficialDownloadAvailableBeforeHover;
+    metadata.visibleOfficialDownloadAvailableAfterHover = visibleOfficialDownloadAvailableAfterHover;
+    metadata.optionsButtonAvailableBeforeHover = optionsButtonAvailableBeforeHover;
+    metadata.optionsButtonAvailableAfterHover = optionsButtonAvailableAfterHover;
     metadata.individualButtonFallbackPossible = individualButtonFallbackPossible;
     metadata.zipMp3Possible = safeMp3UrlAvailable;
     metadata.recommendedMode = safeMp3UrlAvailable ? "zip" : (individualButtonFallbackPossible ? "individual" : "manual");
 
     console.info("[MP3 DIAGNOSTIC]", trackLabel(song), {
-      audioUrlVisible,
+      cardAvailable,
+      audioUrlVisibleBeforeRefresh,
+      audioUrlVisibleAfterRefresh: mediaInfo.audioUrlVisibleAfterRefresh,
+      hydratedAudioUrlAvailable: mediaInfo.hydratedAudioUrlAvailable,
       audioUrlAllowed: safeMp3UrlAvailable,
-      visibleOfficialDownloadAvailable,
+      visibleOfficialDownloadAvailableBeforeHover,
+      visibleOfficialDownloadAvailableAfterHover,
+      optionsButtonAvailableBeforeHover,
+      optionsButtonAvailableAfterHover,
       individualButtonFallbackPossible,
       exportMode: state.exportMode
     });
@@ -1765,15 +1798,15 @@
           warnings.push("MP3 was handled by Suno/browser and will use the browser download location, not the selected script folder.");
           warnings.push("Duplicate history was not updated for this track because the official Suno/browser download cannot be confirmed by GM_download.");
         } else {
-          const baseReason = safeMp3UrlAvailable
-            ? "Direct MP3 download failed."
-            : "No direct authorized MP3 URL was visible.";
-          mp3FailureReason = `${baseReason} ${officialDownload.error || "No visible official Suno download button was found."}`;
+          metadata.officialDownloadError = officialDownload.error || "";
+          mp3FailureReason = safeMp3UrlAvailable
+            ? "Direct authorized MP3 URL failed, and no visible Suno Download/Audio/MP3 control was found after hover/menu reveal. Open the song card, make sure the Download menu is visible, then retry Individual mode."
+            : individualNoControlMessage;
           warnings.push(mp3FailureReason);
           console.error("[FAILED]", duplicateKey, mp3FailureReason);
         }
       } else if (!mp3Exported && !mp3FailureReason) {
-        mp3FailureReason = "No direct authorized MP3 URL was visible. Switch Mode to Individual for MP3 or use Suno manual download.";
+        mp3FailureReason = state.exportMode === "zip" ? zipNoDirectMessage : individualNoControlMessage;
         warnings.push(mp3FailureReason);
         console.error("[FAILED]", duplicateKey, mp3FailureReason);
       }
@@ -2210,43 +2243,215 @@
   }
 
   function findAudioUrl(card) {
+    const candidates = [];
     if (card.matches && card.matches("audio[src], audio source[src], source[src], a[href]")) {
       const rawSelf = card.getAttribute("src") || card.getAttribute("href") || "";
-      if (rawSelf && (MP3_RE.test(rawSelf) || /audio|download/i.test(rawSelf))) {
-        return new URL(rawSelf, location.href).href;
+      if (rawSelf) {
+        candidates.push(rawSelf);
       }
     }
     const media = card.querySelector("audio[src], audio source[src], source[type='audio/mpeg'][src]");
     if (media && media.getAttribute("src")) {
-      return new URL(media.getAttribute("src"), location.href).href;
+      candidates.push(media.getAttribute("src"));
     }
     const links = Array.from(card.querySelectorAll("a[href]"));
-    const direct = links.find((link) => MP3_RE.test(link.href) || /audio|download/i.test(link.href));
-    return direct ? new URL(direct.getAttribute("href"), location.href).href : "";
+    links.forEach((link) => candidates.push(link.getAttribute("href") || link.href));
+    return firstUsableAudioUrl(...candidates);
+  }
+
+  function refreshSongMediaInfo(song, card) {
+    const audioUrlBefore = song.audioUrl || "";
+    const cardAudioUrl = card ? findAudioUrl(card) : "";
+    const hydratedAudioUrl = findHydratedAudioUrlForSong(song, card);
+    const audioUrlAfter = firstUsableAudioUrl(cardAudioUrl, hydratedAudioUrl, audioUrlBefore);
+    if (audioUrlAfter) {
+      song.audioUrl = audioUrlAfter;
+      song.audio_url = audioUrlAfter;
+      song.downloadUrl = song.downloadUrl || audioUrlAfter;
+    }
+    return {
+      audioUrlBefore,
+      cardAudioUrl,
+      hydratedAudioUrl,
+      hydratedAudioUrlAvailable: Boolean(hydratedAudioUrl),
+      audioUrlAfter,
+      audioUrlVisibleAfterRefresh: Boolean(audioUrlAfter),
+      safeMp3UrlAvailable: Boolean(audioUrlAfter)
+    };
+  }
+
+  function findHydratedAudioUrlForSong(song, card) {
+    const tokens = hydrationMatchTokens(song, card);
+    if (!tokens.length) {
+      return "";
+    }
+
+    const fields = [
+      "audio_url",
+      "audioUrl",
+      "download_url",
+      "downloadUrl",
+      "stream_audio_url",
+      "streamAudioUrl",
+      "playable_url",
+      "playableUrl"
+    ].join("|");
+    const fieldRe = new RegExp(`["']?(?:${fields})["']?\\s*[:=]\\s*["']([^"']+)["']`, "gi");
+
+    for (const source of hydratedSearchSources(card)) {
+      fieldRe.lastIndex = 0;
+      let match = fieldRe.exec(source);
+      while (match) {
+        const context = source.slice(Math.max(0, match.index - 2500), Math.min(source.length, match.index + 2500));
+        const url = decodeHydratedUrl(match[1]);
+        if (contextMatchesHydrationTokens(context, tokens) && isUsableAudioUrl(url)) {
+          return url;
+        }
+        match = fieldRe.exec(source);
+      }
+    }
+    return "";
+  }
+
+  function hydratedSearchSources(card) {
+    const sources = [];
+    if (card) {
+      sources.push(card.outerHTML || normalizedText(card));
+    }
+    document.querySelectorAll("script:not([src]), script[type='application/json'], script[type='application/ld+json'], script#__NEXT_DATA__").forEach((node) => {
+      const text = node.textContent || "";
+      if (text && text.length < 3000000) {
+        sources.push(text);
+      }
+    });
+    return sources;
+  }
+
+  function hydrationMatchTokens(song, card) {
+    const values = new Set([
+      song && song.id,
+      song && song.songId,
+      song && song.clip_id,
+      song && song.fallbackId
+    ]);
+    const urls = [song && song.url, song && song.sunoUrl, card ? findSongUrl(card) : ""].filter(Boolean);
+    urls.forEach((url) => {
+      const match = String(url).match(SONG_LINK_RE);
+      if (match) {
+        values.add(match[1]);
+      }
+    });
+    const combined = `${urls.join(" ")} ${card ? normalizedText(card) : ""}`;
+    const uuid = combined.match(UUID_RE);
+    if (uuid) {
+      values.add(uuid[0]);
+    }
+    const title = cleanTitle(song && song.title);
+    if (title && title.length >= 4) {
+      values.add(title);
+    }
+    return Array.from(values)
+      .map((value) => normalizeHydrationSearchText(value))
+      .filter((value) => value.length >= 4);
+  }
+
+  function contextMatchesHydrationTokens(context, tokens) {
+    const searchable = normalizeHydrationSearchText(context);
+    return tokens.some((token) => searchable.includes(token));
+  }
+
+  function normalizeHydrationSearchText(value) {
+    return String(value || "")
+      .replace(/\\u002f/gi, "/")
+      .replace(/\\u003a/gi, ":")
+      .replace(/\\\//g, "/")
+      .replace(/&amp;/gi, "&")
+      .toLowerCase()
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function decodeHydratedUrl(value) {
+    const decoded = String(value || "")
+      .replace(/\\u002f/gi, "/")
+      .replace(/\\u003a/gi, ":")
+      .replace(/\\\//g, "/")
+      .replace(/&amp;/gi, "&")
+      .trim();
+    try {
+      return new URL(decoded, location.href).href;
+    } catch {
+      return "";
+    }
+  }
+
+  function firstUsableAudioUrl(...candidates) {
+    for (const candidate of candidates) {
+      const url = toAbsoluteUrl(candidate);
+      if (url && isUsableAudioUrl(url)) {
+        return url;
+      }
+    }
+    return "";
+  }
+
+  function toAbsoluteUrl(rawUrl) {
+    if (!rawUrl) {
+      return "";
+    }
+    try {
+      return new URL(String(rawUrl), location.href).href;
+    } catch {
+      return "";
+    }
+  }
+
+  function isUsableAudioUrl(rawUrl) {
+    return isAllowedSunoUrl(rawUrl) && isLikelyAudioUrl(rawUrl);
+  }
+
+  function isLikelyAudioUrl(rawUrl) {
+    let url;
+    try {
+      url = new URL(String(rawUrl), location.href);
+    } catch {
+      return false;
+    }
+    const href = url.href.toLowerCase();
+    const host = url.hostname.toLowerCase();
+    return MP3_RE.test(href)
+      || /\b(audio|mp3|download|stream|playable)\b/i.test(href)
+      || ((host.includes("cdn") || href.includes("/media/")) && isSunoHost(host));
   }
 
   function findOfficialDownloadButton(card) {
-    const controls = Array.from(card.querySelectorAll("button, a[href], [role='button']"));
+    const controls = Array.from(card.querySelectorAll("button, a[href], [role='button'], [role='menuitem']"));
     return controls.find((control) => {
-      if (!isVisible(control)) {
+      if (!isVisible(control) || looksLikeWrongOfficialControl(control)) {
         return false;
       }
       const text = controlSearchText(control).toLowerCase();
-      return text.includes("download") && (text.includes("mp3") || text.includes("audio") || text.includes("song") || text.trim() === "download");
+      return /\b(download|audio|mp3)\b/.test(text);
     }) || null;
   }
 
   function findOfficialOptionsButton(card) {
     const controls = Array.from(card.querySelectorAll("button, a[href], [role='button']"));
     return controls.find((control) => {
-      if (!isVisible(control)) {
+      if (!isVisible(control) || looksLikeWrongOfficialControl(control)) {
         return false;
       }
       const text = controlSearchText(control).toLowerCase();
       const ariaHasPopup = String(control.getAttribute("aria-haspopup") || "").toLowerCase();
+      const ariaExpanded = control.hasAttribute("aria-expanded");
+      const ariaControls = control.hasAttribute("aria-controls");
       return /\b(more|options|menu|actions|ellipsis)\b/.test(text)
         || text.includes("...")
         || text.includes("\u22ef")
+        || text.includes("\u2022\u2022\u2022")
+        || /\b(more|options|menu|actions|overflow)\b/.test(control.getAttribute("data-testid") || "")
+        || ariaExpanded
+        || ariaControls
         || ariaHasPopup === "menu";
     }) || null;
   }
@@ -2257,12 +2462,14 @@
     }
 
     const key = buildTrackKey(track);
+    await revealCardActions(card);
+
     const directButton = findOfficialDownloadButton(card);
     if (directButton) {
       console.info("[DOWNLOADING]", key, `${trackLabel(track)} via visible official Suno download button`);
       clickVisibleControl(directButton);
       await delay(450);
-      const audioChoice = findVisibleActionControl(document, [/\b(audio|mp3)\b/i], { exclude: new Set([directButton]) });
+      const audioChoice = findVisibleActionControlInRoots(getVisiblePopupRoots(directButton), [/\b(audio|mp3)\b/i], { exclude: new Set([directButton]) });
       if (audioChoice) {
         clickVisibleControl(audioChoice);
       }
@@ -2278,7 +2485,7 @@
     clickVisibleControl(optionsButton);
     await delay(550);
 
-    const downloadItem = findVisibleActionControl(document, [/\bdownload\b/i], { exclude: new Set([optionsButton]) });
+    const downloadItem = findVisibleActionControlInRoots(getVisiblePopupRoots(optionsButton), [/\bdownload\b/i], { exclude: new Set([optionsButton]) });
     if (!downloadItem) {
       return { clicked: false, error: "Visible options menu opened, but no Download item was found." };
     }
@@ -2286,7 +2493,7 @@
     clickVisibleControl(downloadItem);
     await delay(550);
 
-    const audioChoice = findVisibleActionControl(document, [/\b(audio|mp3)\b/i], { exclude: new Set([optionsButton, downloadItem]) });
+    const audioChoice = findVisibleActionControlInRoots(getVisiblePopupRoots(optionsButton), [/\b(audio|mp3)\b/i], { exclude: new Set([optionsButton, downloadItem]) });
     if (audioChoice) {
       clickVisibleControl(audioChoice);
       return { clicked: true, method: "options-audio", message: "Visible Suno Download > Audio/MP3 menu item was clicked." };
@@ -2294,11 +2501,68 @@
     return { clicked: true, method: "options-download", message: "Visible Suno Download menu item was clicked." };
   }
 
+  async function revealCardActions(card) {
+    if (!card) {
+      return;
+    }
+    if (typeof card.scrollIntoView === "function") {
+      card.scrollIntoView({ block: "center", inline: "center" });
+    }
+    const rect = card.getBoundingClientRect();
+    const clientX = Math.max(1, Math.floor(rect.left + Math.min(rect.width / 2, 40)));
+    const clientY = Math.max(1, Math.floor(rect.top + Math.min(rect.height / 2, 40)));
+    const eventInit = { bubbles: true, cancelable: true, composed: true, clientX, clientY, view: window };
+    ["pointerenter", "mouseenter", "mouseover", "mousemove"].forEach((type) => {
+      const EventCtor = type.startsWith("pointer") && typeof PointerEvent === "function" ? PointerEvent : MouseEvent;
+      card.dispatchEvent(new EventCtor(type, eventInit));
+    });
+    await delay(500);
+  }
+
+  function getVisiblePopupRoots(trigger) {
+    const roots = [];
+    const controlledId = trigger && trigger.getAttribute && trigger.getAttribute("aria-controls");
+    if (controlledId) {
+      const controlled = document.getElementById(controlledId);
+      if (controlled && isVisible(controlled)) {
+        roots.push(controlled);
+      }
+    }
+    document.querySelectorAll([
+      "[role='menu']",
+      "[role='dialog']",
+      "[data-radix-popper-content-wrapper]",
+      "[data-radix-menu-content]",
+      "[data-radix-popover-content]",
+      "[data-state='open'][role]",
+      "[data-headlessui-state]"
+    ].join(", ")).forEach((root) => {
+      if (isVisible(root) && !roots.includes(root)) {
+        roots.push(root);
+      }
+    });
+    roots.push(document);
+    return roots;
+  }
+
+  function findVisibleActionControlInRoots(roots, patterns, options = {}) {
+    for (const root of roots) {
+      const match = findVisibleActionControl(root, patterns, options);
+      if (match) {
+        return match;
+      }
+    }
+    return null;
+  }
+
   function findVisibleActionControl(root, patterns, options = {}) {
-    const controls = Array.from(root.querySelectorAll("button, a[href], [role='button'], [role='menuitem'], [role='option']"));
+    const selector = root === document
+      ? "[role='menuitem'], [role='option'], [data-radix-collection-item], [data-menu-item], [cmdk-item]"
+      : "button, a[href], [role='button'], [role='menuitem'], [role='option'], [data-radix-collection-item], [data-menu-item], [cmdk-item]";
+    const controls = Array.from(root.querySelectorAll(selector));
     const excluded = options.exclude || new Set();
     return controls.find((control) => {
-      if (excluded.has(control) || !isVisible(control)) {
+      if (excluded.has(control) || !isVisible(control) || looksLikeWrongOfficialControl(control)) {
         return false;
       }
       const text = controlSearchText(control);
@@ -2314,12 +2578,31 @@
   }
 
   function controlSearchText(control) {
-    return [
+    const parts = [
       control.textContent || "",
       control.getAttribute("aria-label") || "",
       control.getAttribute("title") || "",
-      control.getAttribute("data-testid") || ""
-    ].join(" ").replace(/\s+/g, " ").trim();
+      control.getAttribute("data-testid") || "",
+      control.getAttribute("role") || ""
+    ];
+    if (control.attributes) {
+      Array.from(control.attributes).forEach((attribute) => {
+        const name = attribute.name.toLowerCase();
+        if (name.includes("aria") || name.includes("data") || name.includes("test") || name.includes("label") || name.includes("title")) {
+          parts.push(attribute.name, attribute.value || "");
+        }
+      });
+    }
+    control.querySelectorAll("svg title, title").forEach((node) => {
+      parts.push(node.textContent || "");
+    });
+    return parts.join(" ").replace(/\s+/g, " ").trim();
+  }
+
+  function looksLikeWrongOfficialControl(control) {
+    const text = controlSearchText(control).toLowerCase();
+    return /\b(play|pause|like|share|remix|create|extend)\b/.test(text)
+      && !/\b(download|audio|mp3|more|options|menu|actions)\b/.test(text);
   }
 
   function isCardSelected(card) {
