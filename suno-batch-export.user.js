@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno Batch Exporter - Library Workspace Only
 // @namespace    https://github.com/emmanueltremblay9-stack/Suno-Download-It-All-Remember
-// @version      0.1.10
+// @version      0.1.11
 // @description  Export owned Suno Library/Workspace songs with sidecars and optional ID3 metadata.
 // @author       Emmanuel Tremblay / Codex
 // @homepageURL  https://github.com/emmanueltremblay9-stack/Suno-Download-It-All-Remember
@@ -19,8 +19,10 @@
 // @grant        GM_setValue
 // @grant        GM_xmlhttpRequest
 // @grant        GM_registerMenuCommand
+// @connect      self
 // @connect      suno.com
 // @connect      www.suno.com
+// @connect      suno.ai
 // @connect      app.suno.ai
 // @connect      cdn.suno.ai
 // @connect      cdn1.suno.ai
@@ -34,7 +36,7 @@
   "use strict";
 
   const SCRIPT_NAME = "Suno Batch Export";
-  const VERSION = "0.1.10";
+  const VERSION = "0.1.11";
   const DEFAULT_THROTTLE_MS = 1500;
   const MIN_THROTTLE_MS = 750;
   const AUTO_SCAN_IDLE_MS = 900;
@@ -1056,6 +1058,10 @@
     const safeId = id || `visible-${shortHash(fallbackBasis)}`;
     const key = `${safeId}-${shortHash([url, audioUrl, title, duration, creationDate, coverUrl, textHash].join("|"))}`;
     const baseName = cleanFileName(`${artist} - ${title} [${safeId}]`);
+    console.info("[DETECTED]", title, {
+      songUrl: url || "",
+      audioUrl: audioUrl || ""
+    });
 
     return {
       key,
@@ -1230,14 +1236,23 @@
 
     try {
       const fileName = options.fileName || track.suggestedFileName || `${cleanFileName(trackLabel(track))}.mp3`;
+      let downloadResult;
       if (options.blob) {
-        await saveExportBlob(options.blob, fileName, options.relativePath || `mp3/${fileName}`, { confirmedDownload: true });
+        downloadResult = await saveExportBlob(options.blob, fileName, options.relativePath || `mp3/${fileName}`, { confirmedDownload: true });
       } else {
         const url = firstNonEmpty(track.downloadUrl, track.download_url, track.audioUrl, track.audio_url);
         if (!url) {
           throw new Error("No downloadable MP3 URL is available for this track.");
         }
-        await downloadUrlWithGm(url, fileName);
+        downloadResult = await downloadUrlWithGm(url, fileName);
+      }
+      if (downloadResult && downloadResult.confirmed === false) {
+        console.warn("[FAILED]", key, trackLabel(track), "Download was started with browser fallback, but completion could not be confirmed.");
+        return {
+          status: "downloaded-unconfirmed",
+          key,
+          error: downloadResult.error || "Browser fallback download was started, but completion could not be confirmed."
+        };
       }
       await markTrackDownloaded(track);
       return { status: "downloaded", key };
@@ -1460,15 +1475,19 @@
     }
 
     if (zip && !state.cancelRequested) {
-      const successfulResults = state.results.filter((result) => result.status === "success");
-      if (successfulResults.length) {
+      const zipHasFiles = Boolean(zip.files && Object.keys(zip.files).length);
+      if (zipHasFiles) {
         const blob = await zip.generateAsync({ type: "blob" });
         const stamp = new Date().toISOString().replace(/[:.]/g, "-");
         const zipFileName = `suno-batch-export-${stamp}.zip`;
         try {
-          await saveExportBlob(blob, zipFileName, zipFileName, { confirmedDownload: true });
-          for (const track of zipTracksToMark) {
-            await markTrackDownloaded(track);
+          const zipSave = await saveExportBlob(blob, zipFileName, zipFileName, { confirmedDownload: true });
+          if (zipSave.confirmed) {
+            for (const track of zipTracksToMark) {
+              await markTrackDownloaded(track);
+            }
+          } else {
+            console.warn("[FAILED]", "zip-download", "ZIP download used browser fallback; duplicate history was not updated because completion could not be confirmed.");
           }
         } catch (error) {
           console.error("[FAILED]", "zip-download", messageFrom(error));
@@ -1505,12 +1524,20 @@
     const metadata = buildMetadata(song, baseName);
     const duplicateKey = buildTrackKey(song);
     let zipGuardKey = "";
+    let mp3FailureReason = "";
+    const safeMp3UrlAvailable = Boolean(song.audioUrl && isAllowedSunoUrl(song.audioUrl));
+    const visibleOfficialDownloadAvailable = Boolean(card && findOfficialDownloadButton(card));
+    metadata.safeMp3UrlAvailable = safeMp3UrlAvailable;
+    metadata.visibleOfficialDownloadAvailable = visibleOfficialDownloadAvailable;
+    metadata.zipMp3Possible = safeMp3UrlAvailable;
+    metadata.recommendedMode = safeMp3UrlAvailable ? "zip" : "individual";
 
     if (context.dryRun) {
       metadata.duplicateKey = duplicateKey;
       metadata.alreadyDownloaded = await isDuplicateTrack(song);
-      metadata.safeMp3UrlAvailable = Boolean(song.audioUrl && isAllowedSunoUrl(song.audioUrl));
-      metadata.visibleOfficialDownloadAvailable = Boolean(card && findOfficialDownloadButton(card));
+      if (state.includeMp3 && state.exportMode === "zip" && !safeMp3UrlAvailable) {
+        warnings.push("ZIP mode needs a direct authorized MP3 URL. A visible Suno download button cannot be captured into a ZIP. Switch Mode to Individual for this track.");
+      }
       return {
         key: song.key,
         title: song.title,
@@ -1582,7 +1609,7 @@
 
     let mp3Exported = false;
     if (state.includeMp3) {
-      if (song.audioUrl && isAllowedSunoUrl(song.audioUrl)) {
+      if (safeMp3UrlAvailable) {
         try {
           const mp3 = await fetchBinary(song.audioUrl, { expected: "audio" });
           assertLooksLikeMp3(mp3.arrayBuffer);
@@ -1595,22 +1622,36 @@
           if (state.exportMode === "zip") {
             addSidecar(context.zip, mp3Blob, `mp3/${metadata.mp3FileName}`);
             mp3Exported = true;
+            console.info("[DOWNLOADED]", duplicateKey, `MP3 added to ZIP: ${metadata.mp3FileName}`);
           } else {
             const safeDownload = await downloadTrackSafely(
               { ...song, suggestedFileName: metadata.mp3FileName, downloadUrl: song.audioUrl },
               { blob: mp3Blob, fileName: metadata.mp3FileName }
             );
-            mp3Exported = safeDownload.status === "downloaded";
-            if (!mp3Exported) {
+            mp3Exported = safeDownload.status === "downloaded" || safeDownload.status === "downloaded-unconfirmed";
+            if (safeDownload.status === "downloaded-unconfirmed") {
+              warnings.push("MP3 download was started with browser fallback, but completion could not be confirmed. Duplicate history was not updated for this track.");
+            } else if (!mp3Exported) {
+              mp3FailureReason = `MP3 download skipped or failed: ${safeDownload.error || safeDownload.status}`;
               warnings.push(`MP3 download skipped or failed: ${safeDownload.error || safeDownload.status}`);
             }
           }
         } catch (error) {
-          warnings.push(`MP3 fetch/embed failed: ${messageFrom(error)}`);
+          if (state.exportMode === "zip") {
+            mp3FailureReason = `ZIP mode could not add MP3 from the authorized audio URL: ${messageFrom(error)}. Switch Mode to Individual for this track or use Suno manual download.`;
+            warnings.push(mp3FailureReason);
+            console.error("[FAILED]", duplicateKey, mp3FailureReason);
+          } else {
+            warnings.push(`Direct MP3 fetch/embed failed: ${messageFrom(error)}. Trying visible Suno download button if available.`);
+          }
         }
+      } else if (state.exportMode === "zip") {
+        mp3FailureReason = "ZIP mode needs a direct authorized MP3 URL. A visible Suno download button cannot be captured into a ZIP. Switch Mode to Individual for this track.";
+        warnings.push(mp3FailureReason);
+        console.error("[FAILED]", duplicateKey, mp3FailureReason);
       }
 
-      if (!mp3Exported && card) {
+      if (!mp3Exported && !mp3FailureReason && card) {
         const button = findOfficialDownloadButton(card);
         if (button && state.exportMode === "individual") {
           console.info("[DOWNLOADING]", duplicateKey, `${trackLabel(song)} via visible Suno download button`);
@@ -1618,10 +1659,15 @@
           warnings.push("MP3 used Suno visible official download button; no duplicate-history mark was written because GM_download did not confirm this download.");
           mp3Exported = true;
         } else if (button) {
-          warnings.push("Visible official download button found, but ZIP mode needs an authorized MP3 URL to embed.");
+          mp3FailureReason = "ZIP mode needs a direct authorized MP3 URL. A visible Suno download button cannot be captured into a ZIP. Switch Mode to Individual for this track.";
+          warnings.push(mp3FailureReason);
         } else {
-          warnings.push("MP3 unavailable: no safe authorized MP3 URL or visible official download button found.");
+          mp3FailureReason = "MP3 unavailable: no safe authorized MP3 URL or visible official download button found. Open the song details, switch Mode to Individual, or use Suno manual download.";
+          warnings.push(mp3FailureReason);
         }
+      } else if (!mp3Exported && !mp3FailureReason) {
+        mp3FailureReason = "MP3 unavailable: no safe authorized MP3 URL or visible official download button found. Open the song details, switch Mode to Individual, or use Suno manual download.";
+        warnings.push(mp3FailureReason);
       }
     }
 
@@ -1649,7 +1695,7 @@
       title: song.title,
       status: hardFailure ? "failed" : "success",
       warnings,
-      error: hardFailure ? "MP3 was not exported. Use Suno manual download and run the local post-processor." : "",
+      error: hardFailure ? mp3FailureReason || "MP3 was not exported. Switch Mode to Individual, open the song details, or use Suno manual download and run the local post-processor." : "",
       metadata
     };
   }
@@ -2086,14 +2132,13 @@
     if (state.downloadDirectoryHandle) {
       const savedPath = await writeBlobToSelectedFolder(blob, relativePath || fileName);
       console.info("[DOWNLOADED]", savedPath);
-      return { status: "folder", path: savedPath };
+      return { status: "folder", path: savedPath, confirmed: true };
     }
     if (options.confirmedDownload) {
-      await downloadBlobWithGm(blob, fileName);
-      return { status: "download", path: fileName };
+      return downloadBlobWithGm(blob, fileName);
     }
     downloadBlob(blob, fileName);
-    return { status: "download", path: fileName };
+    return { status: "download", path: fileName, confirmed: false };
   }
 
   async function writeBlobToSelectedFolder(blob, relativePath) {
@@ -2131,15 +2176,51 @@
   }
 
   async function downloadBlobWithGm(blob, fileName) {
+    console.info("[DOWNLOADING]", "GM_download Blob attempt", fileName);
+    try {
+      return await gmDownloadSource(blob, fileName);
+    } catch (blobError) {
+      console.warn("[FAILED]", "GM_download Blob attempt", fileName, messageFrom(blobError));
+    }
+
     const url = URL.createObjectURL(blob);
     try {
-      await downloadUrlWithGm(url, fileName);
+      console.info("[DOWNLOADING]", "GM_download object URL attempt", fileName);
+      return await gmDownloadSource(url, fileName);
+    } catch (urlError) {
+      console.warn("[FAILED]", "GM_download object URL attempt", fileName, messageFrom(urlError));
+      console.info("[DOWNLOADING]", "browser anchor fallback", fileName);
+      downloadUrlWithAnchor(url, fileName);
+      return {
+        status: "download",
+        path: fileName,
+        confirmed: false,
+        method: "browser-anchor",
+        error: `GM_download Blob/object URL failed: ${messageFrom(urlError)}`
+      };
     } finally {
       setTimeout(() => URL.revokeObjectURL(url), 30000);
     }
   }
 
-  function downloadUrlWithGm(url, fileName) {
+  async function downloadUrlWithGm(url, fileName) {
+    try {
+      return await gmDownloadSource(url, fileName);
+    } catch (error) {
+      console.warn("[FAILED]", "GM_download URL attempt", fileName, messageFrom(error));
+      console.info("[DOWNLOADING]", "browser anchor fallback", fileName);
+      downloadUrlWithAnchor(url, fileName);
+      return {
+        status: "download",
+        path: fileName,
+        confirmed: false,
+        method: "browser-anchor",
+        error: `GM_download URL failed: ${messageFrom(error)}`
+      };
+    }
+  }
+
+  function gmDownloadSource(source, fileName) {
     return new Promise((resolve, reject) => {
       if (typeof GM_download !== "function") {
         reject(new Error("Tampermonkey GM_download is unavailable."));
@@ -2148,10 +2229,10 @@
 
       try {
         GM_download({
-          url,
+          url: source,
           name: cleanFileName(fileName),
           saveAs: false,
-          onload: () => resolve(),
+          onload: () => resolve({ status: "download", path: fileName, confirmed: true, method: "gm-download" }),
           onerror: (error) => reject(new Error(`GM_download failed: ${messageFrom(error)}`)),
           ontimeout: () => reject(new Error("GM_download timed out."))
         });
@@ -2163,6 +2244,11 @@
 
   function downloadBlob(blob, fileName) {
     const url = URL.createObjectURL(blob);
+    downloadUrlWithAnchor(url, fileName);
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  }
+
+  function downloadUrlWithAnchor(url, fileName) {
     const anchor = document.createElement("a");
     anchor.href = url;
     anchor.download = cleanFileName(fileName);
@@ -2170,7 +2256,6 @@
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 30000);
   }
 
   function uniqueBaseName(baseName, usedNames) {
