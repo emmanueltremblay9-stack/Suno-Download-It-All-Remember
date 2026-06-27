@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno Batch Exporter - Library Workspace Only
 // @namespace    https://github.com/emmanueltremblay9-stack/Suno-Download-It-All-Remember
-// @version      0.1.11
+// @version      0.1.12
 // @description  Export owned Suno Library/Workspace songs with sidecars and optional ID3 metadata.
 // @author       Emmanuel Tremblay / Codex
 // @homepageURL  https://github.com/emmanueltremblay9-stack/Suno-Download-It-All-Remember
@@ -36,7 +36,7 @@
   "use strict";
 
   const SCRIPT_NAME = "Suno Batch Export";
-  const VERSION = "0.1.11";
+  const VERSION = "0.1.12";
   const DEFAULT_THROTTLE_MS = 1500;
   const MIN_THROTTLE_MS = 750;
   const AUTO_SCAN_IDLE_MS = 900;
@@ -63,11 +63,16 @@
     includeJson: true,
     includeLyrics: true,
     includeCover: true,
+    saveEmptyLyrics: false,
+    allowSidecarsWhenMp3Fails: false,
     selectedOnly: false,
     multiSelectMode: false,
     scanningAll: false,
     downloadDirectoryHandle: null,
     downloadDirectoryName: "",
+    folderPermissionStatus: "none",
+    lastFolderError: "",
+    folderWriteTestOk: false,
     lastSelectedIndex: -1,
     throttleMs: DEFAULT_THROTTLE_MS,
     status: "Idle.",
@@ -282,9 +287,7 @@
     const failedCount = state.failedKeys.size;
     const canChooseDownloadFolder = canUseDirectoryPicker();
     const folderButtonText = state.downloadDirectoryHandle ? "Change folder" : "Select folder";
-    const folderStatus = state.downloadDirectoryHandle
-      ? `Folder: ${state.downloadDirectoryName || "selected"}`
-      : canChooseDownloadFolder ? "Folder: browser default" : "Folder picker unavailable";
+    const folderStatus = buildFolderStatus(canChooseDownloadFolder);
     const listItems = queuedSongs.map((song, index) => {
       const checked = state.selectedKeys.has(song.key) ? "checked" : "";
       const metaLine = [song.duration, song.creationDate, song.id || song.fallbackId].filter(Boolean).join(" | ");
@@ -494,7 +497,9 @@
             <label class="check"><input type="checkbox" data-option="embedId3" ${state.embedId3 ? "checked" : ""} ${state.running || !state.includeMp3 ? "disabled" : ""}> ID3</label>
             <label class="check"><input type="checkbox" data-option="includeJson" ${state.includeJson ? "checked" : ""} ${state.running ? "disabled" : ""}> JSON</label>
             <label class="check"><input type="checkbox" data-option="includeLyrics" ${state.includeLyrics ? "checked" : ""} ${state.running ? "disabled" : ""}> TXT</label>
+            <label class="check"><input type="checkbox" data-option="saveEmptyLyrics" ${state.saveEmptyLyrics ? "checked" : ""} ${state.running || !state.includeLyrics ? "disabled" : ""}> empty TXT</label>
             <label class="check"><input type="checkbox" data-option="includeCover" ${state.includeCover ? "checked" : ""} ${state.running ? "disabled" : ""}> cover</label>
+            <label class="check"><input type="checkbox" data-option="allowSidecarsWhenMp3Fails" ${state.allowSidecarsWhenMp3Fails ? "checked" : ""} ${state.running ? "disabled" : ""}> sidecars if MP3 fails</label>
             <label>Mode
               <select data-option="exportMode" ${state.running ? "disabled" : ""}>
                 <option value="zip" ${state.exportMode === "zip" ? "selected" : ""}>ZIP</option>
@@ -509,6 +514,7 @@
             <button type="button" class="primary" data-action="dry-run" ${state.running || !allowed || !selectedCount ? "disabled" : ""}>Dry run</button>
             <button type="button" class="primary" data-action="export" ${state.running || !allowed || !selectedCount ? "disabled" : ""}>Export</button>
             <button type="button" data-action="select-folder" title="Select download folder" ${state.running || !canChooseDownloadFolder ? "disabled" : ""}>${folderButtonText}</button>
+            <button type="button" data-action="test-folder" title="Test selected download folder" ${state.running || !state.downloadDirectoryHandle ? "disabled" : ""}>Test folder</button>
             <button type="button" data-action="retry" ${state.running || !allowed || !failedCount ? "disabled" : ""}>Retry failed</button>
             <button type="button" class="danger" data-action="cancel" ${state.running ? "" : "disabled"}>Cancel</button>
             <small class="folder-note">${escapeHtml(folderStatus)}</small>
@@ -621,7 +627,36 @@
     }
     if (action === "select-folder") {
       selectDownloadFolder();
+      return;
     }
+    if (action === "test-folder") {
+      testDownloadFolder();
+    }
+  }
+
+  function buildFolderStatus(canChooseDownloadFolder) {
+    if (state.downloadDirectoryHandle) {
+      const folderName = state.downloadDirectoryName || "selected folder";
+      if (state.lastFolderError) {
+        return `Selected folder is not active; using browser Downloads. Last folder error: ${state.lastFolderError}`;
+      }
+      if (state.folderWriteTestOk) {
+        return `Selected folder is active: ${folderName}. Folder test succeeded. Folder selection lasts only for this page session.`;
+      }
+      if (state.folderPermissionStatus === "granted") {
+        return `Selected folder is active: ${folderName}. Click Test folder to verify writes. Folder selection lasts only for this page session.`;
+      }
+      if (state.folderPermissionStatus === "prompt") {
+        return `Folder selected for this page session: ${folderName}. Permission may need renewal; click Test folder.`;
+      }
+      if (state.folderPermissionStatus === "denied") {
+        return "Selected folder is not active; using browser Downloads.";
+      }
+      return `Folder selected for this page session: ${folderName}. Click Test folder to verify.`;
+    }
+    return canChooseDownloadFolder
+      ? "Selected folder is not active; using browser Downloads."
+      : "Folder picker unavailable; using browser Downloads.";
   }
 
   function scanSongs(options = {}) {
@@ -1363,20 +1398,31 @@
         id: "suno-batch-export",
         mode: "readwrite"
       });
+      state.downloadDirectoryHandle = handle;
+      state.downloadDirectoryName = handle.name || "selected folder";
+      state.folderPermissionStatus = "prompt";
+      state.folderWriteTestOk = false;
+      state.lastFolderError = "";
       const allowed = await ensureDirectoryPermission(handle);
       if (!allowed) {
+        state.downloadDirectoryHandle = null;
+        state.downloadDirectoryName = "";
+        state.folderPermissionStatus = "denied";
+        state.folderWriteTestOk = false;
+        state.lastFolderError = "Permission denied.";
         state.status = "Download folder permission was denied. Normal browser downloads will be used.";
         render();
         return;
       }
-      state.downloadDirectoryHandle = handle;
-      state.downloadDirectoryName = handle.name || "selected folder";
-      state.status = `Download folder selected: ${state.downloadDirectoryName}.`;
+      state.folderPermissionStatus = "granted";
+      state.status = `Download folder selected: ${state.downloadDirectoryName}. Click Test folder to verify. Folder selection lasts only for this page session.`;
       render();
     } catch (error) {
       if (error && error.name === "AbortError") {
         state.status = "Download folder selection canceled.";
       } else {
+        state.lastFolderError = messageFrom(error);
+        state.folderWriteTestOk = false;
         state.status = `Download folder selection failed: ${messageFrom(error)}`;
         console.error("[FAILED]", "select-download-folder", error);
       }
@@ -1389,16 +1435,61 @@
       return false;
     }
     const options = { mode: "readwrite" };
-    if (typeof handle.queryPermission === "function") {
-      const current = await handle.queryPermission(options);
-      if (current === "granted") {
-        return true;
+    const updateStatus = (status) => {
+      if (handle === state.downloadDirectoryHandle) {
+        state.folderPermissionStatus = status;
       }
+    };
+    try {
+      if (typeof handle.queryPermission === "function") {
+        const current = await handle.queryPermission(options);
+        updateStatus(current || "unknown");
+        if (current === "granted") {
+          return true;
+        }
+        if (current === "denied") {
+          return false;
+        }
+      }
+      if (typeof handle.requestPermission === "function") {
+        const next = await handle.requestPermission(options);
+        updateStatus(next || "unknown");
+        return next === "granted";
+      }
+      updateStatus("granted");
+      return true;
+    } catch (error) {
+      if (handle === state.downloadDirectoryHandle) {
+        state.lastFolderError = messageFrom(error);
+        state.folderWriteTestOk = false;
+      }
+      return false;
     }
-    if (typeof handle.requestPermission === "function") {
-      return await handle.requestPermission(options) === "granted";
+  }
+
+  async function testDownloadFolder() {
+    if (!state.downloadDirectoryHandle) {
+      state.status = "Select a download folder first.";
+      render();
+      return;
     }
-    return true;
+
+    try {
+      const stamp = new Date().toISOString();
+      const blob = new Blob([`Suno Batch Export folder test ${stamp}\n`], { type: "text/plain;charset=utf-8" });
+      const savedPath = await writeBlobToSelectedFolder(blob, "suno-batch-export-folder-test.txt");
+      state.folderWriteTestOk = true;
+      state.folderPermissionStatus = "granted";
+      state.lastFolderError = "";
+      state.status = `Folder test succeeded: ${state.downloadDirectoryName || "selected folder"}.`;
+      console.info("[DOWNLOADED]", savedPath);
+    } catch (error) {
+      state.folderWriteTestOk = false;
+      state.lastFolderError = messageFrom(error);
+      state.status = `Folder test failed: ${state.lastFolderError}`;
+      console.error("[FAILED]", "test-download-folder", error);
+    }
+    render();
   }
 
   async function startBatch({ dryRun }) {
@@ -1519,24 +1610,40 @@
 
   async function exportSong(song, context) {
     const warnings = [];
+    const sidecars = [];
     const card = elementByKey.get(song.key);
     const baseName = uniqueBaseName(song.baseName, context.usedNames);
     const metadata = buildMetadata(song, baseName);
     const duplicateKey = buildTrackKey(song);
     let zipGuardKey = "";
     let mp3FailureReason = "";
-    const safeMp3UrlAvailable = Boolean(song.audioUrl && isAllowedSunoUrl(song.audioUrl));
+    const audioUrlVisible = Boolean(song.audioUrl);
+    const safeMp3UrlAvailable = Boolean(audioUrlVisible && isAllowedSunoUrl(song.audioUrl));
     const visibleOfficialDownloadAvailable = Boolean(card && findOfficialDownloadButton(card));
+    const individualButtonFallbackPossible = Boolean(card && (visibleOfficialDownloadAvailable || findOfficialOptionsButton(card)));
+    const zipNoDirectMessage = individualButtonFallbackPossible
+      ? "ZIP mode cannot capture Suno's browser download button. Switch Mode to Individual for MP3."
+      : "No direct authorized MP3 URL was visible. Switch Mode to Individual for MP3 or use Suno manual download.";
+    metadata.audioUrlAllowed = safeMp3UrlAvailable;
     metadata.safeMp3UrlAvailable = safeMp3UrlAvailable;
     metadata.visibleOfficialDownloadAvailable = visibleOfficialDownloadAvailable;
+    metadata.individualButtonFallbackPossible = individualButtonFallbackPossible;
     metadata.zipMp3Possible = safeMp3UrlAvailable;
-    metadata.recommendedMode = safeMp3UrlAvailable ? "zip" : "individual";
+    metadata.recommendedMode = safeMp3UrlAvailable ? "zip" : (individualButtonFallbackPossible ? "individual" : "manual");
+
+    console.info("[MP3 DIAGNOSTIC]", trackLabel(song), {
+      audioUrlVisible,
+      audioUrlAllowed: safeMp3UrlAvailable,
+      visibleOfficialDownloadAvailable,
+      individualButtonFallbackPossible,
+      exportMode: state.exportMode
+    });
 
     if (context.dryRun) {
       metadata.duplicateKey = duplicateKey;
       metadata.alreadyDownloaded = await isDuplicateTrack(song);
       if (state.includeMp3 && state.exportMode === "zip" && !safeMp3UrlAvailable) {
-        warnings.push("ZIP mode needs a direct authorized MP3 URL. A visible Suno download button cannot be captured into a ZIP. Switch Mode to Individual for this track.");
+        warnings.push(zipNoDirectMessage);
       }
       return {
         key: song.key,
@@ -1583,10 +1690,7 @@
         cover = await fetchBinary(song.coverUrl, { expected: "image" });
         const coverExt = extensionForMime(cover.mimeType, ".jpg");
         metadata.coverFileName = `${baseName}${coverExt}`;
-        addSidecar(context.zip, cover.blob, `covers/${metadata.coverFileName}`);
-        if (state.exportMode === "individual") {
-          await saveExportBlob(cover.blob, metadata.coverFileName, `covers/${metadata.coverFileName}`);
-        }
+        sidecars.push({ blob: cover.blob, fileName: metadata.coverFileName, path: `covers/${metadata.coverFileName}` });
       } catch (error) {
         warnings.push(`Cover unavailable: ${messageFrom(error)}`);
       }
@@ -1595,15 +1699,17 @@
     }
 
     if (state.includeLyrics) {
-      const lyricsText = song.lyrics || "";
-      if (!lyricsText) {
+      const lyricsText = String(song.lyrics || "").trim();
+      if (lyricsText || state.saveEmptyLyrics) {
+        const blob = new Blob([lyricsText], { type: "text/plain;charset=utf-8" });
+        metadata.lyricsFileName = `${baseName}.txt`;
+        sidecars.push({ blob, fileName: metadata.lyricsFileName, path: `lyrics/${metadata.lyricsFileName}` });
+        if (!lyricsText) {
+          warnings.push("Lyrics unavailable: no visible lyrics text.");
+        }
+      } else {
         warnings.push("Lyrics unavailable: no visible lyrics text.");
-      }
-      const blob = new Blob([lyricsText], { type: "text/plain;charset=utf-8" });
-      metadata.lyricsFileName = `${baseName}.txt`;
-      addSidecar(context.zip, blob, `lyrics/${metadata.lyricsFileName}`);
-      if (state.exportMode === "individual") {
-        await saveExportBlob(blob, metadata.lyricsFileName, `lyrics/${metadata.lyricsFileName}`);
+        warnings.push("Lyrics TXT skipped because no visible lyrics were found.");
       }
     }
 
@@ -1646,40 +1752,59 @@
           }
         }
       } else if (state.exportMode === "zip") {
-        mp3FailureReason = "ZIP mode needs a direct authorized MP3 URL. A visible Suno download button cannot be captured into a ZIP. Switch Mode to Individual for this track.";
+        mp3FailureReason = zipNoDirectMessage;
         warnings.push(mp3FailureReason);
         console.error("[FAILED]", duplicateKey, mp3FailureReason);
       }
 
-      if (!mp3Exported && !mp3FailureReason && card) {
-        const button = findOfficialDownloadButton(card);
-        if (button && state.exportMode === "individual") {
-          console.info("[DOWNLOADING]", duplicateKey, `${trackLabel(song)} via visible Suno download button`);
-          button.click();
-          warnings.push("MP3 used Suno visible official download button; no duplicate-history mark was written because GM_download did not confirm this download.");
+      if (!mp3Exported && !mp3FailureReason && state.exportMode === "individual") {
+        const officialDownload = await clickOfficialDownloadFlow(card, song);
+        if (officialDownload.clicked) {
           mp3Exported = true;
-        } else if (button) {
-          mp3FailureReason = "ZIP mode needs a direct authorized MP3 URL. A visible Suno download button cannot be captured into a ZIP. Switch Mode to Individual for this track.";
-          warnings.push(mp3FailureReason);
+          metadata.officialDownloadMethod = officialDownload.method || "";
+          warnings.push("MP3 was handled by Suno/browser and will use the browser download location, not the selected script folder.");
+          warnings.push("Duplicate history was not updated for this track because the official Suno/browser download cannot be confirmed by GM_download.");
         } else {
-          mp3FailureReason = "MP3 unavailable: no safe authorized MP3 URL or visible official download button found. Open the song details, switch Mode to Individual, or use Suno manual download.";
+          const baseReason = safeMp3UrlAvailable
+            ? "Direct MP3 download failed."
+            : "No direct authorized MP3 URL was visible.";
+          mp3FailureReason = `${baseReason} ${officialDownload.error || "No visible official Suno download button was found."}`;
           warnings.push(mp3FailureReason);
+          console.error("[FAILED]", duplicateKey, mp3FailureReason);
         }
       } else if (!mp3Exported && !mp3FailureReason) {
-        mp3FailureReason = "MP3 unavailable: no safe authorized MP3 URL or visible official download button found. Open the song details, switch Mode to Individual, or use Suno manual download.";
+        mp3FailureReason = "No direct authorized MP3 URL was visible. Switch Mode to Individual for MP3 or use Suno manual download.";
         warnings.push(mp3FailureReason);
+        console.error("[FAILED]", duplicateKey, mp3FailureReason);
       }
     }
 
-    if (state.includeJson) {
+    const sidecarsAllowed = !state.includeMp3 || mp3Exported || state.allowSidecarsWhenMp3Fails;
+    if (!sidecarsAllowed) {
+      const sidecarMessage = "MP3 was not exported, so sidecars were not saved. Switch to Individual mode or use Suno manual download.";
+      warnings.push(sidecarMessage);
+      mp3FailureReason = mp3FailureReason ? `${mp3FailureReason} ${sidecarMessage}` : sidecarMessage;
+    }
+
+    if (sidecarsAllowed && state.includeJson) {
       metadata.warnings = warnings;
       metadata.mp3Exported = mp3Exported;
       metadata.duplicateKey = duplicateKey;
-      const blob = new Blob([`${JSON.stringify(metadata, null, 2)}\n`], { type: "application/json;charset=utf-8" });
       metadata.metadataFileName = `${baseName}.json`;
-      addSidecar(context.zip, blob, `metadata/${metadata.metadataFileName}`);
-      if (state.exportMode === "individual") {
-        await saveExportBlob(blob, metadata.metadataFileName, `metadata/${metadata.metadataFileName}`);
+      const blob = new Blob([`${JSON.stringify(metadata, null, 2)}\n`], { type: "application/json;charset=utf-8" });
+      sidecars.push({ blob, fileName: metadata.metadataFileName, path: `metadata/${metadata.metadataFileName}` });
+    } else {
+      metadata.warnings = warnings;
+      metadata.mp3Exported = mp3Exported;
+      metadata.duplicateKey = duplicateKey;
+    }
+
+    if (sidecarsAllowed) {
+      for (const sidecar of sidecars) {
+        addSidecar(context.zip, sidecar.blob, sidecar.path);
+        if (state.exportMode === "individual") {
+          await saveExportBlob(sidecar.blob, sidecar.fileName, sidecar.path);
+        }
       }
     }
 
@@ -2106,9 +2231,95 @@
       if (!isVisible(control)) {
         return false;
       }
-      const text = `${control.textContent || ""} ${control.getAttribute("aria-label") || ""} ${control.getAttribute("title") || ""}`.toLowerCase();
+      const text = controlSearchText(control).toLowerCase();
       return text.includes("download") && (text.includes("mp3") || text.includes("audio") || text.includes("song") || text.trim() === "download");
     }) || null;
+  }
+
+  function findOfficialOptionsButton(card) {
+    const controls = Array.from(card.querySelectorAll("button, a[href], [role='button']"));
+    return controls.find((control) => {
+      if (!isVisible(control)) {
+        return false;
+      }
+      const text = controlSearchText(control).toLowerCase();
+      const ariaHasPopup = String(control.getAttribute("aria-haspopup") || "").toLowerCase();
+      return /\b(more|options|menu|actions|ellipsis)\b/.test(text)
+        || text.includes("...")
+        || text.includes("\u22ef")
+        || ariaHasPopup === "menu";
+    }) || null;
+  }
+
+  async function clickOfficialDownloadFlow(card, track) {
+    if (!card) {
+      return { clicked: false, error: "No visible song card is available for the official Suno download flow." };
+    }
+
+    const key = buildTrackKey(track);
+    const directButton = findOfficialDownloadButton(card);
+    if (directButton) {
+      console.info("[DOWNLOADING]", key, `${trackLabel(track)} via visible official Suno download button`);
+      clickVisibleControl(directButton);
+      await delay(450);
+      const audioChoice = findVisibleActionControl(document, [/\b(audio|mp3)\b/i], { exclude: new Set([directButton]) });
+      if (audioChoice) {
+        clickVisibleControl(audioChoice);
+      }
+      return { clicked: true, method: "direct", message: "Visible official Suno download button was clicked." };
+    }
+
+    const optionsButton = findOfficialOptionsButton(card);
+    if (!optionsButton) {
+      return { clicked: false, error: "No visible official Suno download or options button was found." };
+    }
+
+    console.info("[DOWNLOADING]", key, `${trackLabel(track)} via visible Suno options menu`);
+    clickVisibleControl(optionsButton);
+    await delay(550);
+
+    const downloadItem = findVisibleActionControl(document, [/\bdownload\b/i], { exclude: new Set([optionsButton]) });
+    if (!downloadItem) {
+      return { clicked: false, error: "Visible options menu opened, but no Download item was found." };
+    }
+
+    clickVisibleControl(downloadItem);
+    await delay(550);
+
+    const audioChoice = findVisibleActionControl(document, [/\b(audio|mp3)\b/i], { exclude: new Set([optionsButton, downloadItem]) });
+    if (audioChoice) {
+      clickVisibleControl(audioChoice);
+      return { clicked: true, method: "options-audio", message: "Visible Suno Download > Audio/MP3 menu item was clicked." };
+    }
+    return { clicked: true, method: "options-download", message: "Visible Suno Download menu item was clicked." };
+  }
+
+  function findVisibleActionControl(root, patterns, options = {}) {
+    const controls = Array.from(root.querySelectorAll("button, a[href], [role='button'], [role='menuitem'], [role='option']"));
+    const excluded = options.exclude || new Set();
+    return controls.find((control) => {
+      if (excluded.has(control) || !isVisible(control)) {
+        return false;
+      }
+      const text = controlSearchText(control);
+      return patterns.some((pattern) => pattern.test(text));
+    }) || null;
+  }
+
+  function clickVisibleControl(control) {
+    if (typeof control.scrollIntoView === "function") {
+      control.scrollIntoView({ block: "center", inline: "center" });
+    }
+    control.click();
+  }
+
+  function controlSearchText(control) {
+    return [
+      control.textContent || "",
+      control.getAttribute("aria-label") || "",
+      control.getAttribute("title") || "",
+      control.getAttribute("data-testid") || ""
+    ].join(" ").replace(/\s+/g, " ").trim();
   }
 
   function isCardSelected(card) {
@@ -2130,15 +2341,30 @@
 
   async function saveExportBlob(blob, fileName, relativePath, options = {}) {
     if (state.downloadDirectoryHandle) {
-      const savedPath = await writeBlobToSelectedFolder(blob, relativePath || fileName);
-      console.info("[DOWNLOADED]", savedPath);
-      return { status: "folder", path: savedPath, confirmed: true };
+      try {
+        const savedPath = await writeBlobToSelectedFolder(blob, relativePath || fileName);
+        console.info("[DOWNLOADED]", savedPath);
+        return { status: "folder", path: savedPath, confirmed: true };
+      } catch (error) {
+        state.lastFolderError = messageFrom(error);
+        state.folderWriteTestOk = false;
+        state.status = `Selected folder is not active; using browser Downloads. Last folder error: ${state.lastFolderError}`;
+        console.warn("[FAILED]", "selected-folder-write", fileName, state.lastFolderError);
+        render();
+      }
     }
     if (options.confirmedDownload) {
       return downloadBlobWithGm(blob, fileName);
     }
+    console.info("[DOWNLOADING]", "browser anchor fallback", fileName);
     downloadBlob(blob, fileName);
-    return { status: "download", path: fileName, confirmed: false };
+    return {
+      status: "download",
+      path: fileName,
+      confirmed: false,
+      method: "browser-anchor",
+      error: state.lastFolderError ? `Selected folder failed: ${state.lastFolderError}` : "Browser fallback download was started, but completion could not be confirmed."
+    };
   }
 
   async function writeBlobToSelectedFolder(blob, relativePath) {
@@ -2150,6 +2376,7 @@
     if (!allowed) {
       throw new Error("Download folder permission was denied.");
     }
+    state.folderPermissionStatus = "granted";
 
     const parts = String(relativePath || "download")
       .split(/[\\/]+/)
@@ -2172,6 +2399,7 @@
     } finally {
       await writable.close();
     }
+    state.lastFolderError = "";
     return `${state.downloadDirectoryName || "selected folder"}/${parts.join("/")}`;
   }
 
