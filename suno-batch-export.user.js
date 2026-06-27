@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno Batch Exporter - Library Workspace Only
 // @namespace    https://github.com/emmanueltremblay9-stack/Suno-Download-It-All-Remember
-// @version      0.1.13
+// @version      0.1.14
 // @description  Export owned Suno Library/Workspace songs with sidecars and optional ID3 metadata.
 // @author       Emmanuel Tremblay / Codex
 // @homepageURL  https://github.com/emmanueltremblay9-stack/Suno-Download-It-All-Remember
@@ -36,7 +36,7 @@
   "use strict";
 
   const SCRIPT_NAME = "Suno Batch Export";
-  const VERSION = "0.1.13";
+  const VERSION = "0.1.14";
   const DEFAULT_THROTTLE_MS = 1500;
   const MIN_THROTTLE_MS = 750;
   const AUTO_SCAN_IDLE_MS = 900;
@@ -1632,8 +1632,10 @@
     const visibleOfficialDownloadAvailableBeforeHover = Boolean(card && findOfficialDownloadButton(card));
     const optionsButtonAvailableBeforeHover = Boolean(card && findOfficialOptionsButton(card));
     let mediaInfo = refreshSongMediaInfo(song, card);
-    if (card && state.includeMp3) {
-      await revealCardActions(card);
+    const hoverRevealAttempted = Boolean(card && state.includeMp3 && (context.dryRun || (state.exportMode === "individual" && !mediaInfo.safeMp3UrlAvailable)));
+    let hoverReveal = { ok: false, error: "" };
+    if (hoverRevealAttempted) {
+      hoverReveal = await revealCardActions(card);
       mediaInfo = refreshSongMediaInfo(song, card);
     }
     const safeMp3UrlAvailable = mediaInfo.safeMp3UrlAvailable;
@@ -1647,6 +1649,9 @@
     metadata.audioUrlVisibleBeforeRefresh = audioUrlVisibleBeforeRefresh;
     metadata.audioUrlVisibleAfterRefresh = mediaInfo.audioUrlVisibleAfterRefresh;
     metadata.hydratedAudioUrlAvailable = mediaInfo.hydratedAudioUrlAvailable;
+    metadata.hoverRevealAttempted = hoverRevealAttempted;
+    metadata.hoverRevealOk = hoverRevealAttempted ? hoverReveal.ok : false;
+    metadata.hoverRevealError = hoverReveal.error || "";
     metadata.audioUrlAllowed = safeMp3UrlAvailable;
     metadata.safeMp3UrlAvailable = safeMp3UrlAvailable;
     metadata.visibleOfficialDownloadAvailable = visibleOfficialDownloadAvailableAfterHover;
@@ -1663,6 +1668,9 @@
       audioUrlVisibleBeforeRefresh,
       audioUrlVisibleAfterRefresh: mediaInfo.audioUrlVisibleAfterRefresh,
       hydratedAudioUrlAvailable: mediaInfo.hydratedAudioUrlAvailable,
+      hoverRevealAttempted,
+      hoverRevealOk: metadata.hoverRevealOk,
+      hoverRevealError: metadata.hoverRevealError,
       audioUrlAllowed: safeMp3UrlAvailable,
       visibleOfficialDownloadAvailableBeforeHover,
       visibleOfficialDownloadAvailableAfterHover,
@@ -2503,20 +2511,103 @@
 
   async function revealCardActions(card) {
     if (!card) {
-      return;
+      return { ok: false, error: "No card to reveal." };
     }
-    if (typeof card.scrollIntoView === "function") {
-      card.scrollIntoView({ block: "center", inline: "center" });
+
+    const warnings = [];
+    try {
+      if (typeof card.scrollIntoView === "function") {
+        try {
+          card.scrollIntoView({ block: "center", inline: "center" });
+        } catch (error) {
+          const message = messageFrom(error);
+          warnings.push(`scrollIntoView failed: ${message}`);
+          console.warn("[HOVER REVEAL WARN]", message);
+        }
+      }
+
+      let coords = { clientX: 1, clientY: 1 };
+      try {
+        const rect = card.getBoundingClientRect();
+        coords = {
+          clientX: Math.max(1, Math.floor(rect.left + Math.min(rect.width / 2, 40))),
+          clientY: Math.max(1, Math.floor(rect.top + Math.min(rect.height / 2, 40)))
+        };
+      } catch (error) {
+        const message = messageFrom(error);
+        warnings.push(`coordinate read failed: ${message}`);
+        console.warn("[HOVER REVEAL WARN]", message);
+      }
+
+      const eventResults = ["pointerenter", "mouseenter", "mouseover", "mousemove"]
+        .map((type) => safeDispatchHoverEvent(card, type, coords));
+      eventResults
+        .filter((result) => !result.ok && result.error)
+        .forEach((result) => warnings.push(`${result.type} failed: ${result.error}`));
+      await delay(500);
+      return {
+        ok: eventResults.some((result) => result.ok),
+        error: warnings.join("; ")
+      };
+    } catch (error) {
+      const message = messageFrom(error);
+      console.warn("[HOVER REVEAL WARN]", message);
+      return { ok: false, error: message };
     }
-    const rect = card.getBoundingClientRect();
-    const clientX = Math.max(1, Math.floor(rect.left + Math.min(rect.width / 2, 40)));
-    const clientY = Math.max(1, Math.floor(rect.top + Math.min(rect.height / 2, 40)));
-    const eventInit = { bubbles: true, cancelable: true, composed: true, clientX, clientY, view: window };
-    ["pointerenter", "mouseenter", "mouseover", "mousemove"].forEach((type) => {
-      const EventCtor = type.startsWith("pointer") && typeof PointerEvent === "function" ? PointerEvent : MouseEvent;
-      card.dispatchEvent(new EventCtor(type, eventInit));
-    });
-    await delay(500);
+  }
+
+  function safeDispatchHoverEvent(target, type, coords) {
+    const clientX = coords && Number.isFinite(coords.clientX) ? coords.clientX : 1;
+    const clientY = coords && Number.isFinite(coords.clientY) ? coords.clientY : 1;
+    const pointerInit = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      clientX,
+      clientY,
+      screenX: clientX,
+      screenY: clientY,
+      pointerId: 1,
+      pointerType: "mouse",
+      isPrimary: true,
+      buttons: 0
+    };
+    const mouseInit = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      clientX,
+      clientY,
+      screenX: clientX,
+      screenY: clientY,
+      buttons: 0
+    };
+    const eventInit = { bubbles: true, cancelable: true, composed: true };
+
+    if (type.startsWith("pointer") && typeof PointerEvent === "function") {
+      try {
+        target.dispatchEvent(new PointerEvent(type, pointerInit));
+        return { ok: true, error: "", type };
+      } catch (error) {
+        console.warn("[HOVER REVEAL WARN]", type, "PointerEvent", messageFrom(error));
+      }
+    }
+
+    try {
+      target.dispatchEvent(new MouseEvent(type, mouseInit));
+      return { ok: true, error: "", type };
+    } catch (error) {
+      console.warn("[HOVER REVEAL WARN]", type, "MouseEvent", messageFrom(error));
+    }
+
+    try {
+      target.dispatchEvent(new Event(type, eventInit));
+      return { ok: true, error: "", type };
+    } catch (error) {
+      const message = messageFrom(error);
+      console.warn("[HOVER REVEAL WARN]", type, "Event", message);
+      return { ok: false, error: message, type };
+    }
   }
 
   function getVisiblePopupRoots(trigger) {
