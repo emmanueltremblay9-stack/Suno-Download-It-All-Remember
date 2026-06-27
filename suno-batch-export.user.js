@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno Batch Exporter - Library Workspace Only
 // @namespace    https://github.com/emmanueltremblay9-stack/Suno-Download-It-All-Remember
-// @version      0.1.14
+// @version      0.1.15
 // @description  Export owned Suno Library/Workspace songs with sidecars and optional ID3 metadata.
 // @author       Emmanuel Tremblay / Codex
 // @homepageURL  https://github.com/emmanueltremblay9-stack/Suno-Download-It-All-Remember
@@ -36,7 +36,7 @@
   "use strict";
 
   const SCRIPT_NAME = "Suno Batch Export";
-  const VERSION = "0.1.14";
+  const VERSION = "0.1.15";
   const DEFAULT_THROTTLE_MS = 1500;
   const MIN_THROTTLE_MS = 750;
   const AUTO_SCAN_IDLE_MS = 900;
@@ -2465,48 +2465,69 @@
   }
 
   async function clickOfficialDownloadFlow(card, track) {
-    if (!card) {
-      return { clicked: false, error: "No visible song card is available for the official Suno download flow." };
-    }
-
-    const key = buildTrackKey(track);
-    await revealCardActions(card);
-
-    const directButton = findOfficialDownloadButton(card);
-    if (directButton) {
-      console.info("[DOWNLOADING]", key, `${trackLabel(track)} via visible official Suno download button`);
-      clickVisibleControl(directButton);
-      await delay(450);
-      const audioChoice = findVisibleActionControlInRoots(getVisiblePopupRoots(directButton), [/\b(audio|mp3)\b/i], { exclude: new Set([directButton]) });
-      if (audioChoice) {
-        clickVisibleControl(audioChoice);
+    try {
+      if (!card) {
+        return { clicked: false, error: "No visible song card is available for the official Suno download flow." };
       }
-      return { clicked: true, method: "direct", message: "Visible official Suno download button was clicked." };
+
+      const key = buildTrackKey(track);
+      await revealCardActions(card);
+
+      const directButton = findOfficialDownloadButton(card);
+      if (directButton) {
+        console.info("[DOWNLOADING]", key, `${trackLabel(track)} via visible official Suno download button`);
+        const directClick = clickVisibleControl(directButton);
+        if (!directClick.ok) {
+          return { clicked: false, error: directClick.error };
+        }
+        await delay(450);
+        const audioChoice = findVisibleActionControlInRoots(getVisiblePopupRoots(directButton), [/\b(audio|mp3)\b/i], { exclude: new Set([directButton]) });
+        if (audioChoice) {
+          const audioClick = clickVisibleControl(audioChoice);
+          if (!audioClick.ok) {
+            return { clicked: false, error: audioClick.error };
+          }
+        }
+        return { clicked: true, method: "direct", message: "Visible official Suno download button was clicked." };
+      }
+
+      const optionsButton = findOfficialOptionsButton(card);
+      if (!optionsButton) {
+        return { clicked: false, error: "No visible official Suno download or options button was found." };
+      }
+
+      console.info("[DOWNLOADING]", key, `${trackLabel(track)} via visible Suno options menu`);
+      const optionsClick = clickVisibleControl(optionsButton);
+      if (!optionsClick.ok) {
+        return { clicked: false, error: optionsClick.error };
+      }
+      await delay(550);
+
+      const downloadItem = findVisibleActionControlInRoots(getVisiblePopupRoots(optionsButton), [/\bdownload\b/i], { exclude: new Set([optionsButton]) });
+      if (!downloadItem) {
+        return { clicked: false, error: "Visible options menu opened, but no Download item was found." };
+      }
+
+      const downloadClick = clickVisibleControl(downloadItem);
+      if (!downloadClick.ok) {
+        return { clicked: false, error: downloadClick.error };
+      }
+      await delay(550);
+
+      const audioChoice = findVisibleActionControlInRoots(getVisiblePopupRoots(optionsButton), [/\b(audio|mp3)\b/i], { exclude: new Set([optionsButton, downloadItem]) });
+      if (audioChoice) {
+        const audioClick = clickVisibleControl(audioChoice);
+        if (!audioClick.ok) {
+          return { clicked: false, error: audioClick.error };
+        }
+        return { clicked: true, method: "options-audio", message: "Visible Suno Download > Audio/MP3 menu item was clicked." };
+      }
+      return { clicked: true, method: "options-download", message: "Visible Suno Download menu item was clicked." };
+    } catch (error) {
+      const message = messageFrom(error);
+      console.warn("[OFFICIAL DOWNLOAD WARN]", message);
+      return { clicked: false, error: message };
     }
-
-    const optionsButton = findOfficialOptionsButton(card);
-    if (!optionsButton) {
-      return { clicked: false, error: "No visible official Suno download or options button was found." };
-    }
-
-    console.info("[DOWNLOADING]", key, `${trackLabel(track)} via visible Suno options menu`);
-    clickVisibleControl(optionsButton);
-    await delay(550);
-
-    const downloadItem = findVisibleActionControlInRoots(getVisiblePopupRoots(optionsButton), [/\bdownload\b/i], { exclude: new Set([optionsButton]) });
-    if (!downloadItem) {
-      return { clicked: false, error: "Visible options menu opened, but no Download item was found." };
-    }
-
-    clickVisibleControl(downloadItem);
-    await delay(550);
-
-    const audioChoice = findVisibleActionControlInRoots(getVisiblePopupRoots(optionsButton), [/\b(audio|mp3)\b/i], { exclude: new Set([optionsButton, downloadItem]) });
-    if (audioChoice) {
-      clickVisibleControl(audioChoice);
-      return { clicked: true, method: "options-audio", message: "Visible Suno Download > Audio/MP3 menu item was clicked." };
-    }
-    return { clicked: true, method: "options-download", message: "Visible Suno Download menu item was clicked." };
   }
 
   async function revealCardActions(card) {
@@ -2662,10 +2683,24 @@
   }
 
   function clickVisibleControl(control) {
-    if (typeof control.scrollIntoView === "function") {
-      control.scrollIntoView({ block: "center", inline: "center" });
+    if (!control || !control.isConnected) {
+      return { ok: false, error: "Visible Suno control disappeared before it could be clicked." };
     }
-    control.click();
+    try {
+      if (typeof control.scrollIntoView === "function") {
+        control.scrollIntoView({ block: "center", inline: "center" });
+      }
+    } catch (error) {
+      console.warn("[OFFICIAL DOWNLOAD WARN]", "scrollIntoView", messageFrom(error));
+    }
+    try {
+      control.click();
+      return { ok: true, error: "" };
+    } catch (error) {
+      const message = messageFrom(error);
+      console.warn("[OFFICIAL DOWNLOAD WARN]", "click", message);
+      return { ok: false, error: `Visible Suno control could not be clicked: ${message}` };
+    }
   }
 
   function controlSearchText(control) {
